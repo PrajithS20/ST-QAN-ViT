@@ -1,31 +1,9 @@
-# --- Environment & System ---
-venv/
-__pycache__/
-*.pyc
-.DS_Store
-Thumbs.db
-.vscode/
-.idea/
 
-# --- Phase 1: Raw EEG Data (CHB-MIT) ---
-# This ignores everything inside data/raw/ to protect your repo size
 data/raw/
-*.edf
-*.seizures
-*.summary
-*.txt
-
-# --- Phase 1 & 2: Intermediate Processing ---
-# These folders will contain thousands of 32x32 images and 16x16 tensors
+data/processed_signals/
 data/scalograms/
-data/quantum_features/
-*.npy
-*.pt
+venv/
+src/models/__pycache__/
+*.DS_Store
 
-# --- Phase 3: Model Weights ---
-# Keep the results folder for plots, but ignore the heavy model files
-results/models/*.pth
-
-# --- Miscellaneous ---
-*.log
-.env
+results/models/ 

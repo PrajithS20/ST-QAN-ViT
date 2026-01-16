@@ -1,0 +1,10 @@
+torch
+torchvision
+timm
+scikit-learn
+imbalanced-learn
+matplotlib
+seaborn
+pyyaml
+pennylane
+
