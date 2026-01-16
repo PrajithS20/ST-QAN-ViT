@@ -1,0 +1,24 @@
+# Python Environment
+venv/
+__pycache__/
+*.pyc
+
+# CHB-MIT Raw Data (Very Large)
+# We do not push .edf files to GitHub as they exceed size limits [cite: 44, 47]
+data/raw/chb*/*.edf
+data/raw/chb*/*.summary
+
+# Phase 1 & 2 Generated Data
+# Scalograms and Quantum Tensors are too large for standard Git 
+data/scalograms/
+data/quantum_features/
+
+# Phase 3 & 4 Results
+# Keep your plots but ignore the heavy model weights
+results/models/*.pth
+
+# System Files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
