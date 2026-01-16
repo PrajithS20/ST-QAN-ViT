@@ -1,9 +1,36 @@
-
-data/raw/
-data/processed_signals/
-data/scalograms/
+# --- Python & Environment ---
+__pycache__/
+*.py[cod]
 venv/
-src/models/__pycache__/
-*.DS_Store
+.env
+.ipynb_checkpoints/
 
-results/models/ 
+# --- IDE Settings ---
+.vscode/
+.idea/
+*.swp
+
+# --- Heavy Data (DO NOT UPLOAD) ---
+# Ignore raw EEG files
+*.edf
+*.EDF
+
+# Ignore processed numpy arrays and scalograms
+data/processed_signals/*.npz
+data/scalograms/*.npz
+data/raw/*
+
+# --- Models ---
+# Ignore intermediate checkpoints, but KEEP the best model if < 100MB
+results/models/*.pth
+!results/models/best_model.pth
+
+# --- System ---
+.DS_Store
+Thumbs.db
+
+# --- Keep the folder structure, just ignore files inside ---
+# (This trick allows git to track the folders but not the heavy files)
+!data/raw/.gitkeep
+!data/processed_signals/.gitkeep
+!data/scalograms/.gitkeep
