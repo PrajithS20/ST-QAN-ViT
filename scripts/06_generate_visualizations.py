@@ -1,177 +1,225 @@
 import sys
 import os
 import numpy as np
-import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
+import pennylane as qml
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+import timm
+import random
 from pathlib import Path
-
-# Add project root to path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from src.models.hybrid_vit import HybridViT
 
 # --- CONFIG ---
 DATA_DIR = Path("data/scalograms")
 MODEL_PATH = Path("results/models/best_model.pth")
+TRAIN_LOG_PATH = Path("results/tables/training_metrics.csv")
 RESULTS_DIR = Path("results/plots")
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+DEVICE = torch.device("cpu") 
+
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
-def plot_scalograms():
-    print("1. Generating Scalogram Visualization (Normal vs Seizure)...")
-    
-    # Find a file with both classes
-    files = list(DATA_DIR.glob("*.npz"))
-    normal_img = None
-    seizure_img = None
-    
-    # Iterate to find one clear example of each
-    for f in files:
-        data = np.load(f)
-        X = data['X']
-        y = data['y']
-        
-        # Get first Normal
-        if normal_img is None and np.sum(y == 0) > 0:
-            idx = np.where(y == 0)[0][0]
-            normal_img = X[idx]
-            
-        # Get first Seizure
-        if seizure_img is None and np.sum(y == 1) > 0:
-            idx = np.where(y == 1)[0][0]
-            seizure_img = X[idx]
-            
-        if normal_img is not None and seizure_img is not None:
-            break
-            
-    # Prepare Plot
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    
-    # Normal (Transpose to H,W,C for plotting)
-    norm_disp = np.transpose(normal_img, (1, 2, 0))
-    # Normalize for display (0-1)
-    norm_disp = (norm_disp - norm_disp.min()) / (norm_disp.max() - norm_disp.min())
-    axes[0].imshow(norm_disp)
-    axes[0].set_title("Normal EEG (Inter-ictal)\nLow Energy, Chaotic")
-    axes[0].axis('off')
-    
-    # Seizure
-    sz_disp = np.transpose(seizure_img, (1, 2, 0))
-    sz_disp = (sz_disp - sz_disp.min()) / (sz_disp.max() - sz_disp.min())
-    axes[1].imshow(sz_disp)
-    axes[1].set_title("Seizure EEG (Pre-ictal)\nHigh Energy Vertical Structures (Gamma Band)")
-    axes[1].axis('off')
-    
-    plt.tight_layout()
-    plt.savefig(RESULTS_DIR / "1_scalogram_comparison.png")
-    print(f"   -> Saved to {RESULTS_DIR}/1_scalogram_comparison.png")
-    plt.close()
+# ==========================================
+# 1. MODEL ARCHITECTURE (Required to load weights)
+# ==========================================
 
-def plot_quantum_features():
-    print("2. Generating Quantum Feature Map...")
+n_qubits = 4
+n_layers = 2
+dev = qml.device("default.qubit", wires=n_qubits)
+
+@qml.qnode(dev, interface='torch', diff_method="backprop")
+def quantum_circuit(inputs, weights):
+    qml.templates.AngleEmbedding(inputs, wires=range(n_qubits))
+    qml.templates.StronglyEntanglingLayers(weights, wires=range(n_qubits))
+    return [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)]
+
+class QuantumLayer(nn.Module):
+    def __init__(self, n_features, n_qubits=4, n_layers=2):
+        super().__init__()
+        self.n_qubits = n_qubits
+        self.fc_compress = nn.Linear(n_features, n_qubits)
+        weight_shapes = {"weights": (n_layers, n_qubits, 3)}
+        self.q_layer = qml.qnn.TorchLayer(quantum_circuit, weight_shapes)
+        
+    def forward(self, x):
+        q_in = torch.tanh(self.fc_compress(x)) * np.pi 
+        q_out = self.q_layer(q_in) 
+        return q_out
+
+class HybridViT(nn.Module):
+    def __init__(self, num_classes=1):
+        super().__init__()
+        self.vit = timm.create_model('vit_tiny_patch16_224', pretrained=True)
+        self.n_features = self.vit.head.in_features
+        self.vit.head = nn.Identity() 
+        self.quantum = QuantumLayer(self.n_features)
+        self.classifier = nn.Sequential(
+            nn.BatchNorm1d(self.n_features + 4),
+            nn.Linear(self.n_features + 4, 64),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(64, num_classes)
+        )
+
+    def forward(self, x):
+        features = self.vit(x) 
+        q_out = self.quantum(features) 
+        return features, q_out, self.classifier(torch.cat([features, q_out], dim=1))
+
+# ==========================================
+# 2. SCALOGRAM GALLERY GENERATOR
+# ==========================================
+def plot_scalogram_gallery(num_examples=5):
+    print(f"1. Generating {num_examples} Scalogram Comparisons...")
     
-    # Load Model
-    model = HybridViT().to(DEVICE)
-    try:
-        model.load_state_dict(torch.load(MODEL_PATH))
-    except:
-        print("   Warning: Could not load model weights. Using random init for visualization.")
+    all_files = list(DATA_DIR.glob("*.npz"))
+    seizure_files = [f for f in all_files if "_L1_" in f.name]
+    normal_files = [f for f in all_files if "_L0_" in f.name]
     
-    model.eval()
-    
-    # Get a seizure image
-    files = list(DATA_DIR.glob("*.npz"))
-    img_tensor = None
-    
-    for f in files:
-        data = np.load(f)
-        if np.sum(data['y'] == 1) > 0:
-            idx = np.where(data['y'] == 1)[0][0]
-            img_tensor = torch.tensor(data['X'][idx]).unsqueeze(0).float().to(DEVICE)
-            break
-    
-    if img_tensor is None:
-        print("   Error: No seizure data found for visualization.")
+    if not seizure_files:
+        print("Error: No seizure files found.")
         return
 
-    # Hook into the model to get features BEFORE and AFTER Quantum Layer
+    for i in range(1, num_examples + 1):
+        s_path = random.choice(seizure_files)
+        n_path = random.choice(normal_files)
+        
+        try:
+            with np.load(s_path) as d: s_img = d['X']
+            with np.load(n_path) as d: n_img = d['X']
+            
+            if s_img.ndim == 4: s_img = s_img.squeeze(0)
+            if n_img.ndim == 4: n_img = n_img.squeeze(0)
+            
+            s_disp = s_img[0, :, :]
+            n_disp = n_img[0, :, :]
+            
+            fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+            
+            im1 = axes[0].imshow(n_disp, cmap='jet', aspect='auto', origin='lower')
+            axes[0].set_title(f"Normal EEG\n{n_path.name[:20]}...", fontsize=11)
+            axes[0].axis('off')
+            plt.colorbar(im1, ax=axes[0], fraction=0.046, pad=0.04)
+            
+            im2 = axes[1].imshow(s_disp, cmap='jet', aspect='auto', origin='lower')
+            axes[1].set_title(f"Seizure EEG (Ictal)\n{s_path.name[:20]}...", fontsize=11, fontweight='bold', color='red')
+            axes[1].axis('off')
+            plt.colorbar(im2, ax=axes[1], fraction=0.046, pad=0.04)
+            
+            plt.suptitle(f"Example {i}: Feature Input Visualization", fontsize=15)
+            plt.tight_layout()
+            
+            save_path = RESULTS_DIR / f"1_scalogram_comparison_{i}.png"
+            plt.savefig(save_path, dpi=150)
+            print(f"  -> Saved: {save_path.name}")
+            plt.close()
+            
+        except Exception as e:
+            print(f"  Skipping file due to load error: {e}")
+
+# ==========================================
+# 3. QUANTUM FEATURE MAP
+# ==========================================
+def plot_quantum_analysis():
+    print("\n2. Generating Quantum Feature Analysis...")
+    
+    model = HybridViT().to(DEVICE)
+    try:
+        model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
+    except:
+        model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE), strict=False)
+    model.eval()
+    
+    all_files = list(DATA_DIR.glob("*.npz"))
+    seizure_files = [f for f in all_files if "_L1_" in f.name]
+    if not seizure_files: return
+    
+    with np.load(seizure_files[0]) as d: 
+        img = torch.tensor(d['X'], dtype=torch.float32).unsqueeze(0).to(DEVICE)
+        if img.ndim == 5: img = img.squeeze(1)
+
     with torch.no_grad():
-        # 1. ViT Features (Classical Backbone)
-        features = model.vit(img_tensor) # (1, 192)
-        
-        # 2. Pre-Quantum (Reduction to 4 dims)
-        classical_proj = model.pre_quantum(features) 
-        # Tanh squashing to [-1, 1] then scaling to [-pi, pi]
-        classical_activation = torch.tanh(classical_proj) * np.pi 
-        
-        # 3. Quantum Output (Expectation Values)
-        quantum_out = model.quantum_layer(classical_activation)
-        
-    # Convert to Numpy for plotting
-    c_feat = classical_activation.cpu().numpy().flatten()
-    q_feat = quantum_out.cpu().numpy().flatten()
+        c_feats, q_feats, _ = model(img)
     
-    # Plot Comparison
-    fig, axes = plt.subplots(1, 2, figsize=(10, 5))
+    c_feats = c_feats.numpy().flatten()
+    q_feats = q_feats.numpy().flatten()
     
-    # Classical
-    axes[0].bar(range(4), c_feat, color='gray', alpha=0.7)
-    axes[0].set_title("Classical Input (Before Q-Layer)\nLinear Projection")
-    axes[0].set_ylim(-4, 4)
-    axes[0].set_xlabel("Feature Index")
-    axes[0].set_ylabel("Amplitude")
-    axes[0].grid(True, alpha=0.3)
+    fig = plt.figure(figsize=(12, 8))
+    gs = fig.add_gridspec(2, 2)
     
-    # Quantum
-    axes[1].bar(range(4), q_feat, color='purple', alpha=0.9)
-    axes[1].set_title("Quantum Output (After Q-Layer)\nHigh Contrast / Non-Linear Expansion")
-    axes[1].set_ylim(-1.5, 1.5) # Pauli-Z expectation is [-1, 1]
-    axes[1].set_xlabel("Qubit Index")
-    axes[1].grid(True, alpha=0.3)
+    ax1 = fig.add_subplot(gs[0, :])
+    c_grid = c_feats.reshape(12, 16)
+    sns.heatmap(c_grid, ax=ax1, cmap="viridis", cbar=True)
+    ax1.set_title("Classical ViT Features (192 Dimensions)\nExtracted from Temporal Backbone", fontsize=12)
+    ax1.axis('off')
     
-    plt.suptitle("Quantum vs Classical Feature Contrast")
+    ax2 = fig.add_subplot(gs[1, :])
+    colors = ['#FF5733' if x > 0 else '#33C1FF' for x in q_feats]
+    ax2.bar(range(4), q_feats, color=colors, width=0.6, edgecolor='black')
+    ax2.set_title("Quantum Entanglement Features (4 Qubits)\nNon-Linear Decision Boundaries", fontsize=12, fontweight='bold')
+    ax2.set_ylim(-1.1, 1.1)
+    ax2.set_xlabel("Qubit Index")
+    ax2.set_ylabel("Expectation Value <Z>")
+    ax2.grid(True, axis='y', linestyle='--', alpha=0.5)
+    
     plt.tight_layout()
-    plt.savefig(RESULTS_DIR / "2_quantum_feature_map.png")
-    print(f"   -> Saved to {RESULTS_DIR}/2_quantum_feature_map.png")
+    save_path = RESULTS_DIR / "2_quantum_feature_map.png"
+    plt.savefig(save_path, dpi=300)
+    print(f"  -> Saved: {save_path.name}")
     plt.close()
 
-def plot_loss_curve():
-    print("3. Generating Training Loss Curve (Reconstructed from Log)...")
+# ==========================================
+# 4. TRAINING LOSS CURVE (NO SENSITIVITY)
+# ==========================================
+def plot_training_curve():
+    print("\n3. Generating Training Loss Curve...")
     
-    # Data from your latest "Golden Version" run (Epoch 1-30)
-    # This matches the run where you got 100% Event Sensitivity
-    epochs = np.arange(1, 31)
+    if not TRAIN_LOG_PATH.exists():
+        json_path = Path("results/history.json")
+        if json_path.exists():
+            import json
+            with open(json_path) as f: history = json.load(f)
+            df = pd.DataFrame({
+                "Epoch": range(1, len(history['loss']) + 1),
+                "Loss": history['loss'],
+                "Acc": history['accuracy']
+            })
+        else:
+            print("Warning: No logs found.")
+            return
+    else:
+        df = pd.read_csv(TRAIN_LOG_PATH)
+        if "Accuracy" in df.columns: df.rename(columns={"Accuracy": "Acc"}, inplace=True)
     
-    # Extracted from your provided terminal output
-    loss_data = [
-        0.4739, 0.2031, 0.1275, 0.0720, 0.0768, 
-        0.0839, 0.0469, 0.0269, 0.0211, 0.0235, 
-        0.0331, 0.0014, 0.0004, 0.0237, 0.0399, 
-        0.0124, 0.0007, 0.0002, 0.0002, 0.0002, 
-        0.0002, 0.0001, 0.0001, 0.0001, 0.0001, 
-        0.0001, 0.0001, 0.0001, 0.0001, 0.0001
-    ]
+    fig, ax1 = plt.subplots(figsize=(10, 6))
     
-    plt.figure(figsize=(8, 6))
-    plt.plot(epochs, loss_data, marker='o', linestyle='-', color='b', label='Training Loss')
+    # Plot Loss (Red)
+    sns.lineplot(data=df, x="Epoch", y="Loss", ax=ax1, color="#E74C3C", label="Training Loss", linewidth=3, marker='o')
+    ax1.set_ylabel("Cross Entropy Loss", color="#E74C3C", fontweight='bold', fontsize=12)
+    ax1.tick_params(axis='y', labelcolor="#E74C3C")
+    ax1.grid(True, alpha=0.3)
     
-    # Highlight the "Best Model" save point (Epoch 1)
-    # Although loss kept dropping, your validation sensitivity peaked early
-    plt.axvline(x=1, color='g', linestyle='--', label='Initial Best Save')
-    plt.axvline(x=13, color='r', linestyle=':', label='Convergence (Loss < 0.001)')
+    # Plot Accuracy Only (Blue)
+    ax2 = ax1.twinx()
+    sns.lineplot(data=df, x="Epoch", y="Acc", ax=ax2, color="#2E86C1", label="Val Accuracy", linewidth=2.5, linestyle="--")
     
-    plt.title("Training Loss Curve (Hybrid Quantum-ViT)")
-    plt.xlabel("Epochs")
-    plt.ylabel("Binary Cross Entropy Loss")
-    plt.legend()
-    plt.grid(True, alpha=0.3)
+    # REMOVED SENSITIVITY PLOT HERE
     
-    plt.savefig(RESULTS_DIR / "3_training_loss_reconstructed.png")
-    print(f"   -> Saved to {RESULTS_DIR}/3_training_loss_reconstructed.png")
-    plt.close()
+    ax2.set_ylabel("Validation Accuracy (0-1)", color="#2E86C1", fontweight='bold', fontsize=12)
+    ax2.set_ylim(0, 1.05)
+    
+    # Legends
+    lines, labels = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines + lines2, labels + labels2, loc="center right", shadow=True)
+    
+    plt.title("ST-QAN-ViT Training Dynamics", fontsize=14, fontweight='bold')
+    plt.savefig(RESULTS_DIR / "3_training_loss_curve.png", dpi=300)
+    print(f"  -> Saved: {RESULTS_DIR / '3_training_loss_curve.png'}")
 
 if __name__ == "__main__":
-    plot_scalograms()
-    plot_quantum_features()
-    plot_loss_curve()
-    print("\n✅ All visualization requirements completed.")
+    plot_scalogram_gallery(5)
+    plot_quantum_analysis()
+    plot_training_curve()
+    print("\n✅ All visualizations generated successfully.")

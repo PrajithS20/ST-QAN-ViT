@@ -1,63 +1,105 @@
-# 🧠 ST-QAN-ViT: Hybrid Quantum-Classical Vision Transformer for Seizure Prediction
+# Maths-ST_QAN_ViT: Spatio-Temporal Quantum Attention Network
 
-![Python](https://img.shields.io/badge/Python-3.8%2B-blue)
-![PyTorch](https://img.shields.io/badge/PyTorch-GPU-orange)
-![PennyLane](https://img.shields.io/badge/Quantum-PennyLane-purple)
-![Status](https://img.shields.io/badge/Status-Complete-green)
+A hybrid classical-quantum deep learning pipeline for Epileptic Seizure Prediction using Electroencephalogram (EEG) data.
 
-A state-of-the-art implementation of a **Hybrid Quantum Neural Network** combined with a **Vision Transformer (ViT)** to predict epileptic seizures using the **CHB-MIT Scalp EEG Database**.
+This project implements a novel architecture that fuses a classical Vision Transformer (ViT) with a 4-qubit Quantum Neural Network (QNN) to accurately detect pre-ictal states (the period up to 15 minutes before a seizure) from EEG signals. 
 
-This project converts 1D EEG signals into 2D Time-Frequency Scalograms (using CWT) and processes them through a Quantum Entanglement layer to extract high-dimensional features, achieving clinical-grade performance.
+## 🧠 Architecture Overview
 
----
+The pipeline leverages time-frequency representations (scalograms) of EEG signals to extract both macro-level spatial features and micro-level quantum states.
 
-## 🏆 Key Results
+1. **Signal Preprocessing**: Raw `.edf` files (e.g., CHB-MIT dataset) are bandpass filtered (1-50Hz) and segment into 30-second windows.
+2. **Feature Extraction**: Continuous Wavelet Transform (CWT) generates Maximum Energy Scalograms (224x224 RGB images) representing the frequency spectrum across all EEG channels.
+3. **Classical Backbone (ViT)**: A pre-trained `vit_tiny_patch16_224` (via `timm`) extracts high-level 192-dimensional features from the scalograms.
+4. **Quantum Layer (QNN)**: The classical features are compressed and embedded into a 4-qubit parameterized quantum circuit (via `PennyLane`), utilizing `AngleEmbedding` and `StronglyEntanglingLayers` to capture complex multidimensional correlations.
+5. **Fusion & Classification**: Classical and Quantum features are concatenated and passed through a Multi-Layer Perceptron (MLP) for binary classification (Seizure vs. Normal).
 
-Our Hybrid Quantum architecture achieved statistical significance over classical baselines.
+## 🚀 Key Features
 
-| Metric | Target | **Our Result** | Status |
-| :--- | :--- | :--- | :--- |
-| **ROC - AUC** | > 0.90 | **0.9748** | 🚀 Exceeded |
-| **Event Sensitivity** | > 92% | **100.00%** | 🌟 Perfect |
-| **False Positive Rate** | < 0.5/hr | **0.10/hr** | ✅ Optimized |
-| **Window Accuracy** | High | **95.78%** | ✅ Passed |
+*   **Hybrid ViT + Quantum Layer**: Integrates PyTorch and PennyLane for a state-of-the-art hybrid architecture.
+*   **Multiprocessing Scalogram Generation**: Fast, parallelized CWT feature extraction across multiple CPU cores.
+*   **Stratified Training Split**: Guarantees actual seizure events are properly represented in the validation and test sets.
+*   **Weighted Random Sampling**: Effectively handles severe class imbalance between normal EEG and pre-ictal periods.
+*   **Comprehensive Evaluation metrics**: Reports Clinical standards including Event Sensitivity, False Positive Rate per Hour (FPR/hr), and Window Accuracy.
+*   **Rich Visualizations**: Provides automatically generated Saliency Maps, Confusion Matrices, ROC Curves, and more.
 
----
+## 📂 Project Structure
 
-## 📊 Visualizations
+```text
+Maths-ST_QAN_ViT/
+├── data/
+│   ├── raw/                    # Place raw .edf files here (e.g., chb01, chb02)
+│   ├── processed_signals/      # .npz files containing 30s EEG windows
+│   └── scalograms/             # 224x224 Scalogram images (.npz format)
+├── results/
+│   ├── models/                 # Saved model checkpoints (best_model.pth)
+│   └── plots/                  # Generated evaluation and explainability images
+├── scripts/
+│   ├── 01_signal_preprocessing.py   # EDF to 30s windows
+│   ├── 02_generate_scalograms.py    # Windows to CWT Scalograms
+│   ├── 03_train_model.py            # Train HybridViT
+│   ├── 04_final_evaluation.py       # Clinical Metrics & Reporting
+│   ├── 05_explainability.py         # Generate Saliency/Heatmaps
+│   └── 06_generate_visualizations.py # Additional Visualizations
+├── src/
+│   └── models/
+│       └── hybrid_vit.py            # Core PyTorch/PennyLane Model Definition
+├── requirements.txt
+└── README.md
+```
 
-### 1. ROC Curve (AUC = 0.97)
-Demonstrates high sensitivity with a very low false positive rate.
-![ROC Curve](results/plots/roc_curve.png)
+## 🛠️ Installation
 
-### 2. Confusion Matrix (Balanced)
-Shows the model's ability to detect seizure windows while minimizing false alarms.
-![Confusion Matrix](results/plots/confusion_matrix.png)
+1. **Clone the repository**
+2. **Create a virtual environment (Optional but recommended):**
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   ```
+3. **Install dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
+   *Required packages include: `torch`, `torchvision`, `timm`, `pennylane`, `mne`, `pywt`, `cv2`, `scikit-learn`, `matplotlib`, `seaborn`.*
 
-### 3. Explainability (Attention Map)
-The model correctly identifies the **Gamma-band energy spike** at the onset of a seizure.
-![XAI](results/plots/explainability_map.png)
+## 🏃 Usage Pipeline
 
----
+Run the scripts in sequential order:
 
-## 🛠️ Architecture Pipeline
+1. **Preprocess Data**:
+   Place your patient folders (e.g., `chb01`) containing the `.edf` and summary text files inside `data/raw/`.
+   ```bash
+   python scripts/01_signal_preprocessing.py
+   ```
 
-1.  **Signal Engineering:**
-    *   **Input:** Raw `.edf` EEG files (CHB-MIT).
-    *   **Preprocessing:** Bandpass Filter (1-50Hz), Windowing (30s), Labeling (Pre-ictal vs Inter-ictal).
-2.  **Time-Frequency Analysis:**
-    *   **Transformation:** Continuous Wavelet Transform (CWT) using Complex Morlet Wavelets.
-    *   **Output:** 224x224 RGB Scalograms.
-3.  **Hybrid Model (QAN-ViT):**
-    *   **Backbone:** Vision Transformer (ViT-Tiny).
-    *   **Quantum Layer:** 4-Qubit Variational Circuit (PennyLane) with Strong Entanglement.
-    *   **Head:** Residual connection fusing Classical + Quantum features.
+2. **Generate Scalograms**:
+   *Note: This process is computationally heavy and will utilize all available CPU cores.*
+   ```bash
+   python scripts/02_generate_scalograms.py
+   ```
 
----
+3. **Train the Model**:
+   ```bash
+   python scripts/03_train_model.py
+   ```
 
-## 💻 Installation & Usage
+4. **Evaluate Performance**:
+   Generates clinical metrics, ROC curves, and confusion matrices in `results/plots/`.
+   ```bash
+   python scripts/04_final_evaluation.py
+   ```
 
-### 1. Clone the Repository
-```bash
-git clone https://github.com/YOUR_USERNAME/ST-QAN-ViT.git
-cd ST-QAN-ViT
+5. **Generate Explainability Maps**:
+   Outputs visual saliency maps showing which time-frequencies the model focuses on.
+   ```bash
+   python scripts/05_explainability.py
+   ```
+
+## 📊 Results & Visualizations
+
+The scripts automatically output detailed figures to the `results/plots/` directory, including:
+- `confusion_matrix.png` & `roc_curve.png`
+- `explainability_map.png` (Gradient-based focus maps over scalograms)
+- `vit_attention_map.png`
+- `3_training_loss_curve.png`
+- Various comparative analyses (PSD, latency profiling).

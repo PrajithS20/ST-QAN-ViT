@@ -4,74 +4,64 @@ import pennylane as qml
 import timm
 import numpy as np
 
+# --- 1. QUANTUM LAYER (Standard Dense) ---
+n_qubits = 4
+n_layers = 2
+dev = qml.device("default.qubit", wires=n_qubits)
+
+@qml.qnode(dev, interface='torch', diff_method="backprop")
+def quantum_circuit(inputs, weights):
+    qml.templates.AngleEmbedding(inputs, wires=range(n_qubits))
+    qml.templates.StronglyEntanglingLayers(weights, wires=range(n_qubits))
+    return [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)]
+
 class QuantumLayer(nn.Module):
-    """
-    Hybrid Quantum Layer with 4 Qubits.
-    """
-    def __init__(self, n_qubits=4, n_layers=2):
+    def __init__(self, n_features, n_qubits=4, n_layers=2):
         super().__init__()
         self.n_qubits = n_qubits
-        self.n_layers = n_layers
+        self.fc_compress = nn.Linear(n_features, n_qubits)
         
-        dev = qml.device("default.qubit", wires=n_qubits)
-        
-        @qml.qnode(dev, interface='torch')
-        def circuit(inputs, weights):
-            # Angle Embedding (Encodes data into rotation angles)
-            qml.templates.AngleEmbedding(inputs, wires=range(n_qubits))
-            # Entangling Layers (The "Quantum Neural Network" part)
-            qml.templates.StronglyEntanglingLayers(weights, wires=range(n_qubits))
-            # Measure Expectation Value (Returns 4 values)
-            return [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)]
-        
-        self.qnode = circuit
         weight_shapes = {"weights": (n_layers, n_qubits, 3)}
-        self.qlayer = qml.qnn.TorchLayer(self.qnode, weight_shapes)
-
+        self.q_layer = qml.qnn.TorchLayer(quantum_circuit, weight_shapes)
+        
     def forward(self, x):
-        return self.qlayer(x)
+        # Compress (192 -> 4)
+        q_in = torch.tanh(self.fc_compress(x)) * np.pi 
+        # Quantum Calculation
+        q_out = self.q_layer(q_in) 
+        return q_out
 
 class HybridViT(nn.Module):
     def __init__(self, num_classes=1):
         super().__init__()
         
-        # 1. Load Pretrained ViT
+        # 1. ViT Backbone (Standard)
         self.vit = timm.create_model('vit_tiny_patch16_224', pretrained=True)
-        
-        # Get feature size (usually 192 for tiny, 384 for small)
-        n_features = self.vit.head.in_features
-        self.vit.head = nn.Identity() # Remove original head
+        self.n_features = self.vit.head.in_features
+        self.vit.head = nn.Identity() # Remove head
         
         # 2. Quantum Branch
-        self.n_qubits = 4
-        self.pre_quantum = nn.Linear(n_features, self.n_qubits)
-        self.quantum_layer = QuantumLayer(n_qubits=self.n_qubits)
+        self.quantum = QuantumLayer(self.n_features)
         
-        # 3. Classical Branch (Residual Connection)
-        # We keep the original features to ensure gradient flow
-        
-        # 4. Final Classifier
-        # Input = Original Features + Quantum Features (Concatenation)
+        # 3. Classifier (Residual Fusion)
+        # We concatenate Classical (192) + Quantum (4)
         self.classifier = nn.Sequential(
-            nn.Linear(n_features + self.n_qubits, 32),
+            nn.BatchNorm1d(self.n_features + 4),
+            nn.Linear(self.n_features + 4, 64),
             nn.ReLU(),
             nn.Dropout(0.1),
-            nn.Linear(32, num_classes)
+            nn.Linear(64, num_classes)
         )
 
     def forward(self, x):
-        # 1. Extract Features from ViT
-        features = self.vit(x) # Shape: (Batch, 192)
+        # 1. Classical Features
+        features = self.vit(x) # (Batch, 192)
         
-        # 2. Quantum Path
-        q_in = torch.tanh(self.pre_quantum(features)) * np.pi # Squash to [-pi, pi]
-        q_out = self.quantum_layer(q_in) # Shape: (Batch, 4)
+        # 2. Quantum Features
+        q_out = self.quantum(features) # (Batch, 4)
         
-        # 3. Concatenate (Residual Connection)
-        # This is the secret sauce: Mix Classical and Quantum info
+        # 3. Fusion
         combined = torch.cat([features, q_out], dim=1)
         
-        # 4. Classify
-        logits = self.classifier(combined)
-        
-        return logits
+        # 4. Classification
+        return self.classifier(combined)

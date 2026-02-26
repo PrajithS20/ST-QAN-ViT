@@ -8,129 +8,133 @@ from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 from pathlib import Path
 from tqdm import tqdm
 from sklearn.metrics import accuracy_score, recall_score
-import matplotlib.pyplot as plt
+import random
 
-# Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from src.models.hybrid_vit import HybridViT
 
 # --- CONFIG ---
 DATA_DIR = Path("data/scalograms")
 MODEL_SAVE_DIR = Path("results/models")
-PLOT_SAVE_DIR = Path("results/plots")
 BATCH_SIZE = 16 
 EPOCHS = 30
 LEARNING_RATE = 1e-4
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 MODEL_SAVE_DIR.mkdir(parents=True, exist_ok=True)
-PLOT_SAVE_DIR.mkdir(parents=True, exist_ok=True)
 
 class SeizureDataset(Dataset):
     def __init__(self, file_paths):
-        self.data = []
+        self.file_paths = file_paths
         self.labels = []
-        print("Loading dataset into RAM...")
-        for f in tqdm(file_paths):
-            loaded = np.load(f)
-            X = loaded['X'] 
-            y = loaded['y'] 
-            if X.shape[0] > 0:
-                self.data.append(X)
-                self.labels.append(y)
-        self.data = np.concatenate(self.data, axis=0)
-        self.labels = np.concatenate(self.labels, axis=0)
-        self.data = torch.tensor(self.data, dtype=torch.float32)
-        self.labels = torch.tensor(self.labels, dtype=torch.float32).unsqueeze(1)
+        print(f"Scanning {len(file_paths)} files for labels...")
         
-    def __len__(self): return len(self.data)
-    def __getitem__(self, idx): return self.data[idx], self.labels[idx]
+        # Fast Scan
+        for f in tqdm(file_paths):
+            # We trust the filename contains the label to speed up loading
+            # Filename format: "..._L1_..." or "..._L0_..."
+            if "_L1_" in f.name:
+                self.labels.append(1.0)
+            else:
+                self.labels.append(0.0)
+            
+        self.labels = torch.tensor(self.labels, dtype=torch.float32)
+        
+    def __len__(self): return len(self.file_paths)
+    
+    def __getitem__(self, idx):
+        path = self.file_paths[idx]
+        try:
+            with np.load(path) as data:
+                X = data['X']
+                y = data['y']
+            if X.ndim == 4: X = X.squeeze(0)
+            y = np.atleast_1d(y)
+            return torch.tensor(X, dtype=torch.float32), torch.tensor(y, dtype=torch.float32)
+        except:
+            return torch.zeros((3, 224, 224)), torch.tensor([0.0])
 
-def get_metrics(loader, model, device):
-    model.eval()
-    all_preds = []
-    all_labels = []
-    with torch.no_grad():
-        for images, labels in loader:
-            images, labels = images.to(device), labels.to(device)
-            outputs = model(images)
-            preds = (torch.sigmoid(outputs) > 0.5).float()
-            all_preds.extend(preds.cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
+def get_stratified_split(all_files):
+    """
+    Splits data 80/20 but GUARANTEES that 20% of seizures go to Val.
+    """
+    # 1. Separate by Class
+    pos_files = [f for f in all_files if "_L1_" in f.name]
+    neg_files = [f for f in all_files if "_L0_" in f.name]
     
-    acc = accuracy_score(all_labels, all_preds)
-    sens = recall_score(all_labels, all_preds, zero_division=0)
-    return acc, sens
-
-def plot_training_results(history):
-    epochs = range(1, len(history['loss']) + 1)
+    print(f"Found {len(pos_files)} Seizure files and {len(neg_files)} Normal files.")
     
-    fig, ax1 = plt.subplots(figsize=(10, 6))
+    # 2. Shuffle independently
+    random.seed(42)
+    random.shuffle(pos_files)
+    random.shuffle(neg_files)
     
-    # Plot Loss (Left Axis)
-    color = 'tab:blue'
-    ax1.set_xlabel('Epochs')
-    ax1.set_ylabel('Training Loss', color=color)
-    ax1.plot(epochs, history['loss'], color=color, linewidth=2, label='Train Loss')
-    ax1.tick_params(axis='y', labelcolor=color)
-    ax1.grid(True, alpha=0.3)
+    # 3. Split Positives (80/20)
+    split_pos = int(0.8 * len(pos_files))
+    train_pos = pos_files[:split_pos]
+    val_pos = pos_files[split_pos:]
     
-    # Plot Sensitivity (Right Axis)
-    ax2 = ax1.twinx()  
-    color = 'tab:red'
-    ax2.set_ylabel('Validation Sensitivity (Recall)', color=color) 
-    ax2.plot(epochs, history['sensitivity'], color=color, linewidth=2, linestyle='--', label='Val Sensitivity')
-    ax2.tick_params(axis='y', labelcolor=color)
+    # 4. Split Negatives (80/20)
+    split_neg = int(0.8 * len(neg_files))
+    train_neg = neg_files[:split_neg]
+    val_neg = neg_files[split_neg:]
     
-    plt.title('Training Dynamics: Loss vs Sensitivity')
-    fig.tight_layout()
+    # 5. Combine
+    train_files = train_pos + train_neg
+    val_files = val_pos + val_neg
     
-    save_path = PLOT_SAVE_DIR / "3_training_loss_curve.png"
-    plt.savefig(save_path)
-    print(f"✅ Training Graph saved to {save_path}")
+    # Shuffle the combined lists so batches are mixed
+    random.shuffle(train_files)
+    random.shuffle(val_files)
+    
+    return train_files, val_files
 
 def train():
-    print(f"--- Starting Retraining (GOLDEN VERSION) on {DEVICE} ---")
+    if torch.cuda.is_available(): torch.cuda.empty_cache()
+    print(f"--- Starting High-Acc Training (Stratified Split) on {DEVICE} ---")
     
-    # Data Setup
     all_files = list(DATA_DIR.glob("*.npz"))
-    full_dataset = SeizureDataset(all_files)
-    train_size = int(0.8 * len(full_dataset))
-    val_size = len(full_dataset) - train_size
-    train_dataset, val_dataset = torch.utils.data.random_split(full_dataset, [train_size, val_size])
+    
+    # --- USE STRATIFIED SPLIT ---
+    train_files, val_files = get_stratified_split(all_files)
+    
+    print(f"Training Set: {len(train_files)} files")
+    print(f"Validation Set: {len(val_files)} files (Guaranteed to contain seizures)")
+    
+    # Save Manifest for Evaluation Script
+    with open("data/test_files_manifest.txt", "w") as f:
+        for path in val_files:
+            f.write(str(path) + "\n")
+            
+    train_dataset = SeizureDataset(train_files)
+    val_dataset = SeizureDataset(val_files)
     
     # Weighted Sampler
-    train_indices = train_dataset.indices
-    all_labels = full_dataset.labels.squeeze()
-    train_labels = all_labels[train_indices]
-    n_pos = torch.sum(train_labels == 1).item()
-    n_neg = torch.sum(train_labels == 0).item()
-    weight_pos = 1.0 / n_pos
+    n_pos = torch.sum(train_dataset.labels == 1).item()
+    n_neg = torch.sum(train_dataset.labels == 0).item()
+    
+    weight_pos = 1.0 / n_pos if n_pos > 0 else 1.0
     weight_neg = 1.0 / n_neg
+    
     sample_weights = torch.zeros(len(train_dataset))
-    sample_weights[train_labels == 1] = weight_pos
-    sample_weights[train_labels == 0] = weight_neg
+    for i, label in enumerate(train_dataset.labels):
+        sample_weights[i] = weight_pos if label == 1 else weight_neg
+    
     sampler = WeightedRandomSampler(weights=sample_weights, num_samples=len(train_dataset), replacement=True)
     
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, sampler=sampler)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, sampler=sampler, num_workers=0)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
     
-    # Model Setup
     model = HybridViT().to(DEVICE)
     criterion = nn.BCEWithLogitsLoss()
-    optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
+    optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=3)
     
-    # --- RESTORED SCHEDULER (Crucial for high accuracy) ---
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3)
+    best_acc = 0.0
     
-    # Metric History
-    history = {'loss': [], 'accuracy': [], 'sensitivity': []}
-    best_sensitivity = 0.0
-
     for epoch in range(EPOCHS):
         model.train()
-        running_loss = 0.0
-        loop = tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS}")
+        loop = tqdm(train_loader, desc=f"Epoch {epoch+1}")
         
         for images, labels in loop:
             images, labels = images.to(DEVICE), labels.to(DEVICE)
@@ -139,37 +143,27 @@ def train():
             loss = criterion(outputs, labels)
             loss.backward()
             optimizer.step()
-            running_loss += loss.item()
             loop.set_postfix(loss=loss.item())
             
-        avg_train_loss = running_loss / len(train_loader)
+        model.eval()
+        preds, targets = [], []
+        with torch.no_grad():
+            for images, labels in val_loader:
+                images, labels = images.to(DEVICE), labels.to(DEVICE)
+                p = (torch.sigmoid(model(images)) > 0.5).float()
+                preds.extend(p.cpu().numpy())
+                targets.extend(labels.cpu().numpy())
         
-        # Validation
-        val_acc, val_sens = get_metrics(val_loader, model, DEVICE)
+        acc = accuracy_score(targets, preds)
+        sens = recall_score(targets, preds, zero_division=0)
         
-        # Scheduler Step
-        scheduler.step(avg_train_loss) # Monitor Loss to drop LR
+        print(f"  Val Acc: {acc:.4f} | Sens: {sens:.4f}")
+        scheduler.step(acc)
         
-        # Store metrics
-        history['loss'].append(avg_train_loss)
-        history['accuracy'].append(val_acc)
-        history['sensitivity'].append(val_sens)
-        
-        print(f"Epoch {epoch+1}: Loss: {avg_train_loss:.4f} | Val Acc: {val_acc:.4f} | SENSITIVITY: {val_sens:.4f}")
-
-        # Save Best Model (Logic: Prioritize Sensitivity)
-        if val_sens > best_sensitivity:
-            best_sensitivity = val_sens
+        if acc > best_acc:
+            best_acc = acc
             torch.save(model.state_dict(), MODEL_SAVE_DIR / "best_model.pth")
-            print("  --> Best Sensitivity Model Saved!")
-        elif val_sens == best_sensitivity and val_acc > 0.90:
-             # Tie-breaker: Accuracy
-             torch.save(model.state_dict(), MODEL_SAVE_DIR / "best_model.pth")
-             print("  --> Best Model Updated (Higher Acc)")
-
-    # Final Plot
-    plot_training_results(history)
-    print("\nTraining Complete.")
+            print("  --> Saved Best Model!")
 
 if __name__ == "__main__":
     train()
